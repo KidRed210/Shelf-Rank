@@ -349,6 +349,7 @@ img{display:block;}
 @media (max-width:600px){.tt-cover{height:88px;}.tt-rate{font-size:9px;padding:0 3px;}.tt-rank{min-width:14px;height:14px;font-size:9px;}.ttb-label{font-size:10px;}.tt-row{gap:5px;}.tt-name{font-size:10px;}}
 
 /* backup & sync */
+.rank-add{display:block;width:auto;margin:0 auto 10px;padding:8px 16px;font-size:13px;border-radius:999px;}
 .backup{margin-top:26px;border-top:1px solid var(--border-soft);padding-top:6px;}
 .backup-btns{display:flex;gap:10px;flex-wrap:wrap;}
 .backup-btns .btn{flex:1;min-width:140px;}
@@ -658,6 +659,12 @@ async function proxiedJSON(url) {
   }
   return null;
 }
+// Direct fetch, then CORS-proxy fallback — for keyless JSON APIs that may block browsers.
+async function getJSON(url) {
+  try { const r = await fetch(url); if (r && r.ok) return await r.json(); } catch (_) {}
+  try { const d = await proxiedJSON(url); if (d) return d; } catch (_) {}
+  return null;
+}
 async function itunesSearch(term, media, entity, limit) {
   const q = new URLSearchParams({ term: term, media: media, limit: String(limit || 1), country: 'US' });
   if (entity) q.set('entity', entity);
@@ -787,6 +794,9 @@ function deserLib(o, cat) {
   if (!o) return L;
   L.unranked = Array.isArray(o.unranked) ? o.unranked : [];
   L.master = Array.isArray(o.master) ? o.master : [];
+  // A previous session may have cached a failed cover lookup as null (e.g. opened via
+  // file:// or before search worked). Clear those so covers re-fetch on a live load.
+  for (const it of [...L.master, ...L.unranked]) { if (it && it.kind === 'books' && it.cover === null) it.cover = undefined; }
   L.totalMatchups = o.totalMatchups || 0;
   L.filterGenre = o.filterGenre || 'all';
   L.filterAuthor = o.filterAuthor || 'all';
@@ -1183,9 +1193,8 @@ async function coverFromOpenLibrary(title, author) {
   try {
     const q = `https://openlibrary.org/search.json?title=${encodeURIComponent(title || '')}` +
               (author ? `&author=${encodeURIComponent(author)}` : '') + `&limit=1`;
-    const res = await fetch(q);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const data = await getJSON(q);
+    if (!data) return null;
     const doc = data.docs && data.docs[0];
     if (!doc) return null;
     if (doc.cover_i) {
@@ -1205,9 +1214,8 @@ async function coverFromGoogleBooks(title, author) {
     const term = [title, author].filter(Boolean).join(' ');
     if (!term) return null;
     const q = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=5`;
-    const res = await fetch(q);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const data = await getJSON(q);
+    if (!data) return null;
     for (const it of (data.items || [])) {
       const links = it.volumeInfo && it.volumeInfo.imageLinks;
       let u = links && (links.thumbnail || links.smallThumbnail);
@@ -1316,15 +1324,16 @@ function topBar() {
 
 function rankScreen() {
   const L = cur(); const c = L.current;
+  const addBtn = `<button data-act="go-add" class="btn btn-ghost rank-add">＋ Add a ${esc(CATS[state.category].noun)}</button>`;
   if (!c) {
     const need = L.master.length < 2 && L.unranked.length === 0;
-    return emptyState(
+    return addBtn + emptyState(
       need ? 'Not enough yet' : 'All caught up',
       need ? `Add at least two ${CATS[state.category].plural} to start ranking.`
            : 'Everything has a slot. Keep tapping to sharpen the order, or check the leaderboard.'
     );
   }
-  if (c.phase === 'sentiment') return sentimentScreen(c.item);
+  if (c.phase === 'sentiment') return addBtn + sentimentScreen(c.item);
 
   const n = L.master.length;
   const rL = (c.isIntro && c.newBook === c.left) ? null : ratingForMasterIndex(L, L.master.indexOf(c.left));
@@ -1334,6 +1343,7 @@ function rankScreen() {
     ? `Placing it in the ${tierLabel(c.newBook && c.newBook.tier)} tier — comparison ${Math.min(c.rounds, c.rounds - (c.roundsLeft || c.rounds) + 1)} of ${c.rounds}.`
     : (c.isIntro ? 'Placing your new title.' : 'Skipping returns one to the pile, untouched.');
   return `
+  ${addBtn}
   <div class="fade">
     <p class="prompt">${prompt}</p>
     <div class="arena">
@@ -1981,6 +1991,7 @@ function wireAll() {
   document.querySelectorAll('[data-act="skip"]').forEach(b => b.onclick = skip);
   document.querySelectorAll('[data-act="reset"]').forEach(b => b.onclick = resetCurrent);
   document.querySelectorAll('[data-act="reset-rankings"]').forEach(b => b.onclick = resetRankings);
+  document.querySelectorAll('[data-act="go-add"]').forEach(b => b.onclick = () => { state.tab = 'library'; state.addOpen = true; render(); const f = document.querySelector('#live-search,#paste-box,.add-form input'); if (f && f.focus) try { f.focus(); } catch (_) {} });
   document.querySelectorAll('[data-act="export-file"]').forEach(b => b.onclick = exportBackup);
   document.querySelectorAll('[data-act="export-site"]').forEach(b => b.onclick = () => { exportSiteData(); const m = document.getElementById('backup-msg'); if (m) m.textContent = 'Downloaded data.json — now upload it into your GitHub repo next to index.html.'; });
   document.querySelectorAll('[data-act="import-file"]').forEach(b => b.onclick = () => { const f = document.getElementById('restore-file'); if (f) f.click(); });
