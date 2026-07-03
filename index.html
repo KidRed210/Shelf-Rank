@@ -754,13 +754,17 @@ function rateSentiment(key) {
   if (L.master.length === 0) {          // first item — just seat it at #1
     L.master.push(item);
     L.current = null; generateMatchup(L);
-  } else {                               // seed Elo + a starting slot, then binary-search the whole ladder
+  } else {                               // sentiment picks the region of the list, then binary-search within it
     const m = L.master.length;
-    const startOpp = nearestByElo(L.master, item); // starting slot reflects the seeded Elo tier
-    const si = L.master.indexOf(startOpp);
-    L.master.splice(si + 1, 0, item);
+    const BANDS = { loved: [0.00, 0.30], liked: [0.15, 0.55], ok: [0.45, 0.85], disliked: [0.70, 1.00] };
+    const band = BANDS[key] || BANDS.ok;
+    let lo = Math.floor(band[0] * m);
+    let hi = Math.ceil(band[1] * m) - 1;
+    lo = Math.max(0, Math.min(lo, m - 1));
+    hi = Math.max(lo, Math.min(hi, m - 1));
+    L.master.splice(lo, 0, item);        // provisional slot at the top of the chosen region
     const rounds = Math.max(1, state.calibrations | 0);
-    nextCalibration(L, item, 0, m - 1, rounds, rounds); // window spans all m opponents
+    nextCalibration(L, item, lo, hi, rounds, rounds);
   }
   scheduleUndo();
   render();
