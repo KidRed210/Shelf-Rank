@@ -344,6 +344,14 @@ img{display:block;}
 .tt-name{font-family:var(--serif);font-size:12px;line-height:1.2;margin:5px 2px 0;font-weight:600;overflow-wrap:break-word;word-break:break-word;hyphens:auto;}
 @media (max-width:600px){.tt-cover{height:88px;}.tt-rate{font-size:9px;padding:0 3px;}.tt-rank{min-width:14px;height:14px;font-size:9px;}.ttb-label{font-size:10px;}.tt-row{gap:5px;}.tt-name{font-size:10px;}}
 
+/* backup & sync */
+.backup{margin-top:26px;border-top:1px solid var(--border-soft);padding-top:6px;}
+.backup-btns{display:flex;gap:10px;flex-wrap:wrap;}
+.backup-btns .btn{flex:1;min-width:140px;}
+.sync-code{width:100%;box-sizing:border-box;height:64px;resize:vertical;border:1px solid var(--border);border-radius:12px;
+  background:var(--surface);color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  padding:10px 12px;line-height:1.35;word-break:break-all;margin-bottom:10px;}
+
 /* tab bar */
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:20;}
 .tabbar .inner{max-width:448px;margin:0 auto;}
@@ -749,7 +757,7 @@ function serLib(L) {
 function save() {
   if (!storageOK) return;
   try {
-    const data = { v: 2, uid, category: state.category, tab: state.tab, calibrations: state.calibrations,
+    const data = { v: 2, uid, savedAt: Date.now(), category: state.category, tab: state.tab, calibrations: state.calibrations,
       libs: { books: serLib(state.libs.books), movies: serLib(state.libs.movies), tv: serLib(state.libs.tv) } };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (_) { storageOK = false; }
@@ -823,7 +831,74 @@ function load() {
   } catch (_) { return false; }
 }
 
-/* --------------------------- matchmaking -------------------------- */
+/* -------------------- backup / cross-device sync ------------------ *
+ * No server: rankings live in this device's storage. Export a file or a
+ * copyable code, restore it on another device to carry everything over.
+ * ------------------------------------------------------------------ */
+function b64encode(str) { try { return btoa(unescape(encodeURIComponent(str))); } catch (_) { return ''; } }
+function b64decode(b64) { try { return decodeURIComponent(escape(atob(b64))); } catch (_) { return ''; } }
+function backupJSON() {
+  save();
+  try { const s = localStorage.getItem(STORAGE_KEY); if (s) return s; } catch (_) {}
+  return JSON.stringify({ v: 2, uid, category: state.category, tab: state.tab, calibrations: state.calibrations,
+    libs: { books: serLib(state.libs.books), movies: serLib(state.libs.movies), tv: serLib(state.libs.tv) } });
+}
+function backupCode() { return b64encode(backupJSON()); }
+function download(text, filename, mime) {
+  try {
+    const blob = new Blob([text], { type: mime || 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  } catch (_) {}
+}
+function exportBackup() { download(backupJSON(), 'shelfrank-backup-' + new Date().toISOString().slice(0, 10) + '.json'); }
+// The shared site file: same data plus a publish timestamp, named data.json.
+function siteDataJSON() {
+  let base; try { base = JSON.parse(backupJSON()); } catch (_) { base = {}; }
+  const now = Date.now(); base.publishedAt = now; base.savedAt = now;
+  return JSON.stringify(base);
+}
+function exportSiteData() { download(siteDataJSON(), 'data.json'); }
+// Accepts raw JSON or a base64 sync code; replaces all sections and reloads.
+function importBackupText(text) {
+  text = (text || '').trim();
+  if (!text) return false;
+  let json = text;
+  try { JSON.parse(json); } catch (_) { json = b64decode(text); }
+  let data; try { data = JSON.parse(json); } catch (_) { return false; }
+  if (!data || !data.libs) return false;
+  try { localStorage.setItem(STORAGE_KEY, json); } catch (_) {}
+  if (!load()) return false;
+  state.tab = 'leaderboard'; clearUndo(); render();
+  return true;
+}
+// Parse a data.json string (raw JSON or base64) -> { json, publishedAt } or null.
+function parseSiteData(text) {
+  text = (text || '').trim(); if (!text) return null;
+  let json = text, d = null;
+  try { d = JSON.parse(json); } catch (_) { try { json = b64decode(text); d = JSON.parse(json); } catch (e) { return null; } }
+  if (!d || !d.libs) return null;
+  return { json, publishedAt: d.publishedAt || d.savedAt || 0 };
+}
+// On open: load the shared repo file (data.json) if it's newer than this device's copy,
+// so everyone who visits sees the same published rankings. Falls back to local storage.
+async function boot() {
+  let site = null;
+  try {
+    const res = await fetch('./data.json?ts=' + Date.now(), { cache: 'no-store' });
+    if (res && res.ok) site = parseSiteData(await res.text());
+  } catch (_) {}
+  let localSavedAt = -1;
+  try { const raw = localStorage.getItem(STORAGE_KEY); if (raw) localSavedAt = (JSON.parse(raw).savedAt) || 0; } catch (_) {}
+  if (site && site.publishedAt >= localSavedAt) {
+    try { localStorage.setItem(STORAGE_KEY, site.json); } catch (_) {}
+  }
+  load();
+  render();
+}
 function hasData(L) { L = L || cur(); return L.master.length + L.unranked.length > 0; }
 
 /* ---- matchmaking ------------------------------------------------- *
@@ -1461,6 +1536,27 @@ function libraryScreen() {
     <button data-act="reset" class="btn btn-danger" style="margin-top:10px;">Reset ${esc(meta.plural)} (remove all titles)</button>
     <button data-act="reset-all" class="btn btn-danger" style="margin-top:10px;">Reset all sections (Books, Movies &amp; TV)</button>
     <p class="note">${saveNote} “Reset rankings” keeps your titles and just clears the scores; the red buttons delete titles.</p>
+    <div class="backup">
+      <p class="sub-h" style="margin-top:26px;">Shared site — everyone sees the same rankings</p>
+      <p class="note" style="text-align:left;margin:0 0 12px;">Publish so anyone who opens the site sees your rankings, on any device. Tap <b>Download data.json</b>, then upload that file into your GitHub repo (drag &amp; drop it next to index.html). The site loads it automatically on open. Do this again whenever you want to update what everyone sees.</p>
+      <div class="backup-btns">
+        <button data-act="export-site" class="btn">Download data.json</button>
+      </div>
+      <p class="sub-h" style="margin-top:22px;">Move to another device manually</p>
+      <p class="note" style="text-align:left;margin:0 0 10px;">A one-time copy (doesn't publish to the site). Download a backup or copy the code, then restore it elsewhere.</p>
+      <div class="backup-btns">
+        <button data-act="export-file" class="btn btn-ghost">Download backup file</button>
+        <button data-act="import-file" class="btn btn-ghost">Restore from file…</button>
+      </div>
+      <input id="restore-file" type="file" accept="application/json,.json" style="display:none" />
+      <label class="note" style="text-align:left;display:block;margin:14px 0 6px;">Or copy this sync code and paste it on your other device:</label>
+      <textarea id="sync-code" class="sync-code" spellcheck="false">${esc(backupCode())}</textarea>
+      <div class="backup-btns">
+        <button data-act="copy-code" class="btn btn-ghost">Copy code</button>
+        <button data-act="restore-code" class="btn btn-ghost">Restore from code</button>
+      </div>
+      <p id="backup-msg" class="note" style="text-align:left;min-height:1em;"></p>
+    </div>
   </div>`;
 }
 
@@ -1865,6 +1961,27 @@ function wireAll() {
   document.querySelectorAll('[data-act="skip"]').forEach(b => b.onclick = skip);
   document.querySelectorAll('[data-act="reset"]').forEach(b => b.onclick = resetCurrent);
   document.querySelectorAll('[data-act="reset-rankings"]').forEach(b => b.onclick = resetRankings);
+  document.querySelectorAll('[data-act="export-file"]').forEach(b => b.onclick = exportBackup);
+  document.querySelectorAll('[data-act="export-site"]').forEach(b => b.onclick = () => { exportSiteData(); const m = document.getElementById('backup-msg'); if (m) m.textContent = 'Downloaded data.json — now upload it into your GitHub repo next to index.html.'; });
+  document.querySelectorAll('[data-act="import-file"]').forEach(b => b.onclick = () => { const f = document.getElementById('restore-file'); if (f) f.click(); });
+  const restoreFile = document.getElementById('restore-file');
+  if (restoreFile) restoreFile.onchange = () => {
+    const file = restoreFile.files && restoreFile.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { const okg = importBackupText(String(reader.result || '')); if (!okg) { const m = document.getElementById('backup-msg'); if (m) m.textContent = 'That file didn’t look like a Shelf Rank backup.'; } };
+    reader.readAsText(file);
+  };
+  document.querySelectorAll('[data-act="copy-code"]').forEach(b => b.onclick = () => {
+    const ta = document.getElementById('sync-code'); if (!ta) return;
+    const done = () => { const m = document.getElementById('backup-msg'); if (m) m.textContent = 'Code copied — paste it on your other device.'; };
+    try { navigator.clipboard.writeText(ta.value).then(done, () => { ta.select(); document.execCommand && document.execCommand('copy'); done(); }); }
+    catch (_) { ta.select(); try { document.execCommand('copy'); } catch (e) {} done(); }
+  });
+  document.querySelectorAll('[data-act="restore-code"]').forEach(b => b.onclick = () => {
+    const ta = document.getElementById('sync-code');
+    const okg = ta && importBackupText(ta.value);
+    if (!okg) { const m = document.getElementById('backup-msg'); if (m) m.textContent = 'That code didn’t work — make sure you pasted the whole thing.'; }
+  });
   document.querySelectorAll('[data-rerank]').forEach(el => el.onclick = () => rerankById(el.getAttribute('data-rerank')));
   document.querySelectorAll('[data-ttcover]').forEach(cell => {
     const it = cur().master.find(b => b.id === cell.getAttribute('data-ttcover'));
@@ -1983,8 +2100,7 @@ try {
     if (link && typeof Blob!=='undefined' && typeof URL!=='undefined' && URL.createObjectURL) link.href = URL.createObjectURL(new Blob([JSON.stringify(mani)],{type:'application/manifest+json'}));
   } catch (_) {}
 })();
-load();
-render();
+boot();
 </script>
 </body>
 </html>
