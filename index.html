@@ -392,6 +392,7 @@ img{display:block;}
 const K_FACTOR = 32;
 const BASE_ELO = 1200;
 const STORAGE_KEY = 'shelfrank.v2';
+const APP_VERSION = 'v13 · 2026-07-03 · search+proxies';
 
 const CATS = {
   books:  { label: 'Books',  noun: 'book',  plural: 'books',  seed: 'Try a sample shelf' },
@@ -649,10 +650,12 @@ function jsonp(url) {
   });
 }
 // Fetch iTunes JSON through a CORS proxy (fallback when the direct call is blocked).
+let lastNetOK = true;
 async function proxiedJSON(url) {
   const proxies = [
     u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
     u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+    u => 'https://thingproxy.freeboard.io/fetch/' + u,
   ];
   for (const p of proxies) {
     try { const r = await fetch(p(url)); if (r && r.ok) { const d = await r.json(); if (d) return d; } } catch (_) {}
@@ -670,11 +673,12 @@ async function itunesSearch(term, media, entity, limit) {
   if (entity) q.set('entity', entity);
   const url = 'https://itunes.apple.com/search?' + q.toString();
   // 1) direct fetch (iTunes usually allows CORS)
-  try { const r = await fetch(url); if (r && r.ok) { const d = await r.json(); if (d && d.results) return d.results; } } catch (_) {}
+  try { const r = await fetch(url); if (r && r.ok) { const d = await r.json(); if (d) { lastNetOK = true; return d.results || []; } } } catch (_) {}
   // 2) JSONP (script tag; bypasses CORS entirely)
-  try { const d = await jsonp(url); if (d && d.results) return d.results; } catch (_) {}
-  // 3) CORS proxy (last resort if both above are blocked)
-  try { const d = await proxiedJSON(url); if (d && d.results) return d.results; } catch (_) {}
+  try { const d = await jsonp(url); if (d) { lastNetOK = true; return d.results || []; } } catch (_) {}
+  // 3) CORS proxies (last resort if both above are blocked)
+  try { const d = await proxiedJSON(url); if (d) { lastNetOK = true; return d.results || []; } } catch (_) {}
+  lastNetOK = false; // nothing could reach the API
   return [];
 }
 function bigArt(url) { return url ? url.replace(/\/\d+x\d+bb\.(jpg|png)$/i, '/600x600bb.$1') : ''; }
@@ -915,6 +919,7 @@ function parseSiteData(text) {
 // On open: load the shared repo file (data.json) if it's newer than this device's copy,
 // so everyone who visits sees the same published rankings. Falls back to local storage.
 async function boot() {
+  try { if (typeof console !== 'undefined') console.log('Shelf Rank ' + APP_VERSION); } catch (_) {}
   let site = null;
   try {
     const res = await fetch('./data.json?ts=' + Date.now(), { cache: 'no-store' });
@@ -1588,6 +1593,7 @@ function libraryScreen() {
       </div>
       <p id="backup-msg" class="note" style="text-align:left;min-height:1em;"></p>
     </div>
+    <p class="note" style="opacity:.6;margin-top:18px;">Shelf Rank ${esc(APP_VERSION)}</p>
   </div>`;
 }
 
@@ -1849,7 +1855,12 @@ async function runLiveSearch(q) {
   if (seq !== searchSeq) return; // a newer keystroke superseded this one
   drop = el('live-drop');
   if (!drop) return;
-  if (!results.length) { drop.innerHTML = `<div class="sug-empty">No matches — check spelling, or you may be offline.</div>`; drop.classList.add('open'); return; }
+  if (!results.length) {
+    const msg = lastNetOK
+      ? 'No matches — try a shorter or more exact title.'
+      : 'Couldn’t reach the search service on this connection. You can still add it by hand with the “Add manually” button below.';
+    drop.innerHTML = `<div class="sug-empty">${msg}</div>`; drop.classList.add('open'); return;
+  }
   drop.innerHTML = results.map((r, i) => sugRow(r, i)).join('');
   drop.classList.add('open');
   drop.querySelectorAll('.sug').forEach(node => {
