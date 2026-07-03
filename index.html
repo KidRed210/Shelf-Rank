@@ -647,12 +647,27 @@ function jsonp(url) {
     setTimeout(() => { if (!done) { clean(); reject(new Error('timeout')); } }, 9000);
   });
 }
+// Fetch iTunes JSON through a CORS proxy (fallback when the direct call is blocked).
+async function proxiedJSON(url) {
+  const proxies = [
+    u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+  ];
+  for (const p of proxies) {
+    try { const r = await fetch(p(url)); if (r && r.ok) { const d = await r.json(); if (d) return d; } } catch (_) {}
+  }
+  return null;
+}
 async function itunesSearch(term, media, entity, limit) {
   const q = new URLSearchParams({ term: term, media: media, limit: String(limit || 1), country: 'US' });
   if (entity) q.set('entity', entity);
   const url = 'https://itunes.apple.com/search?' + q.toString();
+  // 1) direct fetch (iTunes usually allows CORS)
   try { const r = await fetch(url); if (r && r.ok) { const d = await r.json(); if (d && d.results) return d.results; } } catch (_) {}
+  // 2) JSONP (script tag; bypasses CORS entirely)
   try { const d = await jsonp(url); if (d && d.results) return d.results; } catch (_) {}
+  // 3) CORS proxy (last resort if both above are blocked)
+  try { const d = await proxiedJSON(url); if (d && d.results) return d.results; } catch (_) {}
   return [];
 }
 function bigArt(url) { return url ? url.replace(/\/\d+x\d+bb\.(jpg|png)$/i, '/600x600bb.$1') : ''; }
