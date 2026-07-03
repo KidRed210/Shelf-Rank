@@ -1562,10 +1562,11 @@ function libraryScreen() {
     ${state.addOpen ? addItemForm() : `<button data-act="add-open" class="btn btn-ghost" style="margin-top:16px;">Add a ${esc(meta.noun)}</button>`}
     <p class="sub-h">Unranked pile</p>
     ${list}
-    <button data-act="reset-rankings" class="btn btn-ghost" style="margin-top:24px;">Reset rankings (keep my ${esc(meta.plural)})</button>
+    <p class="sub-h" style="margin-top:24px;">Reset ${esc(meta.label)}</p>
+    <button data-act="reset-rankings" class="btn btn-ghost">Reset rankings (keep my ${esc(meta.plural)})</button>
     <button data-act="reset" class="btn btn-danger" style="margin-top:10px;">Reset ${esc(meta.plural)} (remove all titles)</button>
-    <button data-act="reset-all" class="btn btn-danger" style="margin-top:10px;">Reset all sections (Books, Movies &amp; TV)</button>
-    <p class="note">${saveNote} “Reset rankings” keeps your titles and just clears the scores; the red buttons delete titles.</p>
+    <button data-act="reset-all" class="btn btn-danger" style="margin-top:10px;">Reset every section (Books, Movies &amp; TV)</button>
+    <p class="note">The first two only affect <b>${esc(meta.plural)}</b> — switch the top toggle to reset a different medium. “Reset every section” wipes all three.</p>
     <div class="backup">
       <p class="sub-h" style="margin-top:26px;">Shared site — everyone sees the same rankings</p>
       <p class="note" style="text-align:left;margin:0 0 12px;">Publish so anyone who opens the site sees your rankings, on any device. Tap <b>Download data.json</b>, then upload that file into your GitHub repo (drag &amp; drop it next to index.html). The site loads it automatically on open. Do this again whenever you want to update what everyone sees.</p>
@@ -1991,7 +1992,7 @@ function wireAll() {
   document.querySelectorAll('[data-act="skip"]').forEach(b => b.onclick = skip);
   document.querySelectorAll('[data-act="reset"]').forEach(b => b.onclick = resetCurrent);
   document.querySelectorAll('[data-act="reset-rankings"]').forEach(b => b.onclick = resetRankings);
-  document.querySelectorAll('[data-act="go-add"]').forEach(b => b.onclick = () => { state.tab = 'library'; state.addOpen = true; render(); const f = document.querySelector('#live-search,#paste-box,.add-form input'); if (f && f.focus) try { f.focus(); } catch (_) {} });
+  document.querySelectorAll('[data-act="go-add"]').forEach(b => b.onclick = () => { state.tab = 'library'; state.addOpen = true; render(); const f = document.getElementById('add-title') || document.getElementById('live-search'); if (f && f.focus) try { f.focus(); } catch (_) {} });
   document.querySelectorAll('[data-act="export-file"]').forEach(b => b.onclick = exportBackup);
   document.querySelectorAll('[data-act="export-site"]').forEach(b => b.onclick = () => { exportSiteData(); const m = document.getElementById('backup-msg'); if (m) m.textContent = 'Downloaded data.json — now upload it into your GitHub repo next to index.html.'; });
   document.querySelectorAll('[data-act="import-file"]').forEach(b => b.onclick = () => { const f = document.getElementById('restore-file'); if (f) f.click(); });
