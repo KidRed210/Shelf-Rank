@@ -1374,8 +1374,8 @@ function sentimentScreen(item) {
     <p class="prompt">You added a new title — how was it?</p>
     <div class="sentiment-card">
       <div id="cover-sentiment" class="cover">${placeholderFor(item)}</div>
-      <h3 class="title clamp2" style="text-align:center;margin:12px 0 0;">${esc(item.title)}</h3>
-      <p class="author clamp1" style="text-align:center;">${esc(item.subtitle || '')}</p>
+      <h3 class="mtitle" style="text-align:center;margin:12px 0 0;">${esc(item.title)}</h3>
+      <p class="author" style="text-align:center;">${esc(item.subtitle || '')}</p>
     </div>
     <div class="sentiment-btns">${btns}</div>
     <p class="note">Your pick sets its tier (5 Stars 9–10 · Liked 5.5–9 · OK 3–5.5 · Disliked 1–3). It only compares against others in that tier. No score until it’s ranked.</p>
