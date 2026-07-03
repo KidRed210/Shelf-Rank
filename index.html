@@ -389,15 +389,27 @@ function nearestByElo(master, item) {
   }
   return best;
 }
-// Nearest-Elo opponent for `item`, skipping any ids already faced this calibration run.
-function nearestByEloExcluding(master, item, exclude) {
-  let best = null, bestDiff = Infinity;
-  for (const other of master) {
-    if (other === item || exclude.has(other.id)) continue;
-    const d = Math.abs((other.elo ?? BASE_ELO) - (item.elo ?? BASE_ELO));
-    if (d < bestDiff) { bestDiff = d; best = other; }
-  }
-  return best;
+// Move `item` in master to sit directly above (or below) `opponent`.
+function moveItemAdjacent(master, item, opponent, above) {
+  const ci = master.indexOf(item); if (ci !== -1) master.splice(ci, 1);
+  const oi = master.indexOf(opponent);
+  if (oi === -1) { master.splice(Math.max(0, ci), 0, item); return; }
+  master.splice(above ? oi : oi + 1, 0, item);
+  item.moves = (item.moves || 0) + 1;
+}
+// Binary-search opponent selection for a new title. lo/hi index the opponent list
+// (master minus the item, whose order is stable). Picking the midpoint means every
+// result brackets the item: a win narrows to HIGHER opponents, a loss to LOWER ones —
+// so after you beat a ~6 you never get handed a 5 next.
+function nextCalibration(L, item, lo, hi, roundsLeft, rounds) {
+  const others = L.master.filter(x => x !== item);
+  if (lo > hi || others.length === 0 || roundsLeft <= 0) { L.current = null; generateMatchup(L); return; }
+  if (lo < 0) lo = 0; if (hi > others.length - 1) hi = others.length - 1;
+  const mid = Math.floor((lo + hi) / 2);
+  const opp = others[mid];
+  const flip = Math.random() < 0.5;
+  L.current = { phase: 'match', isIntro: true, newBook: item, oppId: opp.id, lo, hi, rounds, roundsLeft,
+    left: flip ? opp : item, right: flip ? item : opp };
 }
 
 /* ----------------------------- CSV (books) ------------------------ */
@@ -742,14 +754,13 @@ function rateSentiment(key) {
   if (L.master.length === 0) {          // first item — just seat it at #1
     L.master.push(item);
     L.current = null; generateMatchup(L);
-  } else {                               // introduce vs the nearest-Elo opponent, provisional splice
-    const opp = nearestByElo(L.master, item);
-    const oi = L.master.indexOf(opp);
-    L.master.splice(oi + 1, 0, item);
-    const flip = Math.random() < 0.5;
+  } else {                               // seed Elo + a starting slot, then binary-search the whole ladder
+    const m = L.master.length;
+    const startOpp = nearestByElo(L.master, item); // starting slot reflects the seeded Elo tier
+    const si = L.master.indexOf(startOpp);
+    L.master.splice(si + 1, 0, item);
     const rounds = Math.max(1, state.calibrations | 0);
-    L.current = { phase: 'match', left: flip ? opp : item, right: flip ? item : opp,
-      newBook: item, isIntro: true, rounds, roundsLeft: rounds, faced: [opp.id] };
+    nextCalibration(L, item, 0, m - 1, rounds, rounds); // window spans all m opponents
   }
   scheduleUndo();
   render();
@@ -761,24 +772,26 @@ function choose(side) {
   const loser = side === 'left' ? c.right : c.left;
   const res = updatedElo(winner.elo ?? BASE_ELO, loser.elo ?? BASE_ELO);
   winner.elo = res.winner; loser.elo = res.loser;
-  const before = new Map(L.master.map((it, i) => [it, i]));
-  slotWinner(L.master, winner, loser);
-  L.master.forEach((it, i) => { const b = before.get(it); if (b !== undefined && b !== i) it.moves = (it.moves || 0) + Math.abs(i - b); });
   winner.matches = (winner.matches || 0) + 1;
   loser.matches = (loser.matches || 0) + 1;
   L.totalMatchups++;
 
-  if (c.isIntro && c.newBook) { // still calibrating this new title against more opponents?
-    const remaining = (c.roundsLeft || 1) - 1;
-    let nextOpp = null;
-    if (remaining > 0) nextOpp = nearestByEloExcluding(L.master, c.newBook, new Set([c.newBook.id, ...(c.faced || [])]));
-    if (nextOpp) {
-      const flip = Math.random() < 0.5;
-      L.current = { phase: 'match', left: flip ? nextOpp : c.newBook, right: flip ? c.newBook : nextOpp,
-        newBook: c.newBook, isIntro: true, rounds: c.rounds, roundsLeft: remaining, faced: [...(c.faced || []), nextOpp.id] };
-      scheduleUndo(); render(); return;
-    }
+  if (c.isIntro && c.newBook) { // calibrating a new title — bracket by the outcome
+    const item = c.newBook;
+    const opp = c.left === item ? c.right : c.left;
+    const itemWon = winner === item;
+    const mid = Math.floor(((c.lo || 0) + (c.hi || 0)) / 2);
+    let lo = c.lo || 0, hi = c.hi || 0;
+    if (itemWon) { hi = mid - 1; moveItemAdjacent(L.master, item, opp, true); }   // ranks ABOVE -> only higher next
+    else { lo = mid + 1; moveItemAdjacent(L.master, item, opp, false); }          // ranks BELOW -> only lower next
+    nextCalibration(L, item, lo, hi, (c.roundsLeft || 1) - 1, c.rounds);
+    scheduleUndo(); render(); return;
   }
+
+  // refine: reorder two already-ranked items
+  const before = new Map(L.master.map((it, i) => [it, i]));
+  slotWinner(L.master, winner, loser);
+  L.master.forEach((it, i) => { const b = before.get(it); if (b !== undefined && b !== i) it.moves = (it.moves || 0) + Math.abs(i - b); });
   L.current = null; generateMatchup(L);
   scheduleUndo(); render();
 }
@@ -845,7 +858,7 @@ function snapshotLib(L) {
     } else {
       current = { phase: 'match', left: ref(c.left), right: ref(c.right),
         newBook: c.newBook ? ref(c.newBook) : null, isIntro: !!c.isIntro,
-        rounds: c.rounds, roundsLeft: c.roundsLeft, faced: c.faced ? [...c.faced] : undefined };
+        oppId: c.oppId, lo: c.lo, hi: c.hi, rounds: c.rounds, roundsLeft: c.roundsLeft };
     }
   }
   return { unranked, master, totalMatchups: L.totalMatchups, current,
