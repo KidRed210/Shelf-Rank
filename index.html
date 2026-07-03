@@ -407,6 +407,47 @@ function ratingForIndex(index, n) {
   const r = 10 - (index / (n - 1)) * 9;
   return Math.round(r * 10) / 10;
 }
+/* ---- tiers ------------------------------------------------------- *
+ * Every ranked item belongs to a sentiment tier. The master list is
+ * always grouped by tier (loved > liked > ok > disliked), matchups
+ * only happen within a tier, and the score is anchored to the tier's
+ * band — so a 5-star is always >= a Liked, which is always >= an OK...
+ * ------------------------------------------------------------------ */
+const TIER_ORDER = { loved: 0, liked: 1, ok: 2, disliked: 3 };
+const TIER_BANDS = { loved: [9, 10], liked: [6, 8.9], ok: [3, 5.9], disliked: [1, 2.9] };
+function ratingToTier(r) { return r >= 9 ? 'loved' : r >= 6 ? 'liked' : r >= 3 ? 'ok' : 'disliked'; }
+function tierBandRating(tier, rankInTier, size) {
+  const band = TIER_BANDS[tier] || TIER_BANDS.ok; const lo = band[0], hi = band[1];
+  if (size <= 1) return Math.round(((lo + hi) / 2) * 10) / 10;
+  const r = hi - (rankInTier / (size - 1)) * (hi - lo);
+  return Math.round(r * 10) / 10;
+}
+// Score for the item at master[index], based on its tier and rank within that tier.
+function ratingForMasterIndex(L, index) {
+  const item = L.master[index];
+  if (!item) return 0;
+  const tier = item.tier || 'ok';
+  let start = index, end = index;
+  while (start > 0 && (L.master[start - 1].tier || 'ok') === tier) start--;
+  while (end < L.master.length - 1 && (L.master[end + 1].tier || 'ok') === tier) end++;
+  return tierBandRating(tier, index - start, end - start + 1);
+}
+function tierStart(master, tier) { // first index of this tier's segment (or where it would begin)
+  const ord = TIER_ORDER[tier] ?? 2;
+  let i = 0;
+  while (i < master.length && (TIER_ORDER[master[i].tier] ?? 2) < ord) i++;
+  return i;
+}
+function tierOthers(L, item) { return L.master.filter(x => x !== item && x.tier === item.tier); }
+function tierLabel(tier) { return ({ loved: '5-star', liked: 'Liked', ok: 'OK', disliked: 'Disliked' })[tier] || 'right'; }
+// Assign tiers to any legacy ranked items (by their old percentile) and keep master grouped by tier.
+function ensureTiers(L) {
+  const n = L.master.length;
+  L.master.forEach((it, i) => { if (!it.tier) it.tier = ratingToTier(ratingForIndex(i, n)); });
+  L.master = L.master.map((it, i) => [it, i])
+    .sort((a, b) => ((TIER_ORDER[a[0].tier] ?? 2) - (TIER_ORDER[b[0].tier] ?? 2)) || (a[1] - b[1]))
+    .map(x => x[0]);
+}
 function slotWinner(master, winner, loser) {
   const iW = master.indexOf(winner), iL = master.indexOf(loser);
   if (iW === -1 || iL === -1) return;
@@ -435,12 +476,11 @@ function moveItemAdjacent(master, item, opponent, above) {
   master.splice(above ? oi : oi + 1, 0, item);
   item.moves = (item.moves || 0) + 1;
 }
-// Binary-search opponent selection for a new title. lo/hi index the opponent list
-// (master minus the item, whose order is stable). Picking the midpoint means every
-// result brackets the item: a win narrows to HIGHER opponents, a loss to LOWER ones —
-// so after you beat a ~6 you never get handed a 5 next.
+// Binary-search opponent selection within the item's OWN tier. lo/hi index the
+// same-tier opponent list (stable order). Win narrows to higher, loss to lower —
+// and it never crosses a tier boundary, so tiers stay strictly ordered.
 function nextCalibration(L, item, lo, hi, roundsLeft, rounds) {
-  const others = L.master.filter(x => x !== item);
+  const others = tierOthers(L, item);
   if (lo > hi || others.length === 0 || roundsLeft <= 0) { L.current = null; generateMatchup(L); return; }
   if (lo < 0) lo = 0; if (hi > others.length - 1) hi = others.length - 1;
   const mid = Math.floor((lo + hi) / 2);
@@ -723,6 +763,7 @@ function migrateV1() {
     L.totalMatchups = d.totalMatchups || 0;
     uid = d.uid || 0;
     normalizeLib(L, 'books');
+    ensureTiers(L);
     if (hasData(L) && !L.current) generateMatchup(L);
     state.category = 'books';
     return hasData(L);
@@ -745,6 +786,7 @@ function load() {
     state.tab = data.tab || 'rank';
     for (const cat of ['books', 'movies', 'tv']) {
       const L = state.libs[cat];
+      ensureTiers(L);
       if (hasData(L) && !L.current) generateMatchup(L);
     }
     return true;
@@ -755,16 +797,17 @@ function load() {
 function hasData(L) { L = L || cur(); return L.master.length + L.unranked.length > 0; }
 
 /* ---- matchmaking ------------------------------------------------- *
- * A new item has NO Elo until you rate it. The first step is a 4-level
- * sentiment pick (Loved / Liked / OK / Disliked) — each level seeds a
- * different starting Elo. From there, normal Elo matchups (nearest-Elo
- * pairing + slotting) place and refine it. Ratings stay percentile-based.
+ * Rating is a 4-tier commitment (5 Stars / Liked / OK / Disliked).
+ * The list is always grouped by tier; a new title only faces books in
+ * its OWN tier to find its spot inside that tier. If it's the first of
+ * its tier, it just drops in (no matchup). Score is anchored to the
+ * tier's band, so tiers can never invert.
  * ------------------------------------------------------------------ */
 const SENTIMENT_LEVELS = [
-  { key: 'loved',    label: '★★★★★ 5 Stars', range: [9, 10], elo: 1500 },
-  { key: 'liked',    label: 'Liked it',    range: [6, 9],  elo: 1300 },
-  { key: 'ok',       label: 'It was OK',   range: [3, 6],  elo: 1150 },
-  { key: 'disliked', label: 'Disliked it', range: [1, 3],  elo: 950 },
+  { key: 'loved',    label: '★★★★★ 5 Stars', range: [9, 10] },
+  { key: 'liked',    label: 'Liked it',    range: [6, 9] },
+  { key: 'ok',       label: 'It was OK',   range: [3, 6] },
+  { key: 'disliked', label: 'Disliked it', range: [1, 3] },
 ];
 function generateMatchup(L) {
   L = L || cur();
@@ -774,10 +817,13 @@ function generateMatchup(L) {
     L.current = { phase: 'sentiment', item, left: null, right: null, newBook: item, isIntro: true };
     return;
   }
-  if (L.master.length < 2) { L.current = null; return; } // nothing to refine yet
-  const a = L.master[Math.floor(Math.random() * L.master.length)];
-  const b = nearestByElo(L.master, a);
-  if (!b) { L.current = null; return; }
+  // refinement: sharpen order WITHIN a tier that has 2+ items
+  const groups = ['loved', 'liked', 'ok', 'disliked'].map(t => L.master.filter(x => x.tier === t)).filter(g => g.length >= 2);
+  if (!groups.length) { L.current = null; return; }
+  const g = groups[Math.floor(Math.random() * groups.length)];
+  let a = g[Math.floor(Math.random() * g.length)];
+  let b = g[Math.floor(Math.random() * g.length)];
+  if (a === b) b = g[(g.indexOf(a) + 1) % g.length];
   const flip = Math.random() < 0.5;
   L.current = { phase: 'match', left: flip ? a : b, right: flip ? b : a, newBook: null, isIntro: false };
 }
@@ -785,24 +831,16 @@ function rateSentiment(key) {
   const L = cur(); const c = L.current;
   if (!c || c.phase !== 'sentiment') return;
   undoState = { category: state.category, lib: snapshotLib(L) };
-  const lvl = SENTIMENT_LEVELS.find(x => x.key === key) || SENTIMENT_LEVELS[2];
   const item = c.item;
-  item.elo = lvl.elo; // seed Elo from the chosen level
-  if (L.master.length === 0) {          // first item — just seat it at #1
-    L.master.push(item);
+  item.tier = (SENTIMENT_LEVELS.find(x => x.key === key) ? key : 'ok');
+  const insertAt = tierStart(L.master, item.tier);
+  const sameTier = L.master.filter(x => x.tier === item.tier).length;
+  L.master.splice(insertAt, 0, item);       // drop in at the top of its tier
+  if (sameTier === 0) {                      // first of its tier — no matchup needed
     L.current = null; generateMatchup(L);
-  } else {                               // map the sentiment's rating range to a position window, then binary-search it
-    const m = L.master.length;
-    const [rLo, rHi] = lvl.range || [3, 6];
-    const fLo = (10 - rHi) / 9;           // 5 Stars(9-10)->top ~11%, Disliked(1-3)->bottom ~22%
-    const fHi = (10 - rLo) / 9;
-    let lo = Math.floor(fLo * m);
-    let hi = Math.ceil(fHi * m) - 1;
-    lo = Math.max(0, Math.min(lo, m - 1));
-    hi = Math.max(lo, Math.min(hi, m - 1));
-    L.master.splice(lo, 0, item);        // provisional slot at the top of the chosen region
+  } else {                                    // order it within the tier via bracketed comparisons
     const rounds = Math.max(1, state.calibrations | 0);
-    nextCalibration(L, item, lo, hi, rounds, rounds);
+    nextCalibration(L, item, 0, sameTier - 1, rounds, rounds);
   }
   scheduleUndo();
   render();
@@ -812,13 +850,11 @@ function choose(side) {
   undoState = { category: state.category, lib: snapshotLib(L) }; // snapshot BEFORE mutating
   const winner = side === 'left' ? c.left : c.right;
   const loser = side === 'left' ? c.right : c.left;
-  const res = updatedElo(winner.elo ?? BASE_ELO, loser.elo ?? BASE_ELO);
-  winner.elo = res.winner; loser.elo = res.loser;
   winner.matches = (winner.matches || 0) + 1;
   loser.matches = (loser.matches || 0) + 1;
   L.totalMatchups++;
 
-  if (c.isIntro && c.newBook) { // calibrating a new title — bracket by the outcome
+  if (c.isIntro && c.newBook) { // calibrating a new title within its tier — bracket by the outcome
     const item = c.newBook;
     const opp = c.left === item ? c.right : c.left;
     const itemWon = winner === item;
@@ -830,7 +866,7 @@ function choose(side) {
     scheduleUndo(); render(); return;
   }
 
-  // refine: reorder two already-ranked items
+  // refine: reorder two items within the same tier
   const before = new Map(L.master.map((it, i) => [it, i]));
   slotWinner(L.master, winner, loser);
   L.master.forEach((it, i) => { const b = before.get(it); if (b !== undefined && b !== i) it.moves = (it.moves || 0) + Math.abs(i - b); });
@@ -843,7 +879,7 @@ function skip() {
   else if (c.isIntro && c.newBook) {                                    // pull the provisional item back out
     const i = L.master.indexOf(c.newBook);
     if (i !== -1) L.master.splice(i, 1);
-    c.newBook.elo = undefined;
+    c.newBook.tier = undefined;
     L.unranked.push(c.newBook);
   }
   L.current = null; generateMatchup(L);
@@ -869,7 +905,7 @@ function resetRankings() {
   const L = cur();
   const items = [...L.master, ...L.unranked];
   if (L.current && L.current.phase === 'sentiment' && L.current.item) items.push(L.current.item);
-  for (const it of items) { it.elo = undefined; it.matches = 0; it.moves = 0; }
+  for (const it of items) { it.elo = undefined; it.matches = 0; it.moves = 0; it.tier = undefined; }
   L.master = []; L.unranked = items; L.totalMatchups = 0; L.current = null;
   L.filterGenre = 'all'; L.filterAuthor = 'all'; L.search = ''; L.segments = []; L.segOpen = false;
   state.tab = 'rank'; state.addOpen = false;
@@ -950,7 +986,7 @@ function densestRange(L) {
   if (n === 0) return null;
   const bins = new Array(9).fill(0); // [1-2),[2-3),...,[9-10]
   L.master.forEach((it, i) => {
-    const r = ratingForIndex(i, n);
+    const r = ratingForMasterIndex(L, i);
     let b = Math.floor(r - 1); // r in [1,10] -> 0..9
     if (b > 8) b = 8; if (b < 0) b = 0;
     bins[b]++;
@@ -973,6 +1009,7 @@ function rerank(item) {
   if (i === -1) return;
   L.master.splice(i, 1);
   item.elo = undefined;
+  item.tier = undefined;
   L.unranked.unshift(item);           // next up
   if (L.current && !L.current.isIntro) L.current = null; // drop a lingering refine so it starts now
   if (!L.current) generateMatchup(L);
@@ -987,10 +1024,9 @@ function rerankById(id) {
 // Already-ranked books by the same author (excluding `item`), newest ranking first, capped.
 function authorSiblings(L, item, cap) {
   if (!item || item.kind !== 'books' || !item.author || item.author === 'Unknown author') return [];
-  const n = L.master.length;
   const out = [];
   L.master.forEach((b, i) => {
-    if (b !== item && b.author === item.author) out.push({ book: b, rating: ratingForIndex(i, n) });
+    if (b !== item && b.author === item.author) out.push({ book: b, rating: ratingForMasterIndex(L, i) });
   });
   return out.slice(0, cap || 6);
 }
@@ -1162,11 +1198,11 @@ function rankScreen() {
   if (c.phase === 'sentiment') return sentimentScreen(c.item);
 
   const n = L.master.length;
-  const rL = ratingForIndex(L.master.indexOf(c.left), n);
-  const rR = ratingForIndex(L.master.indexOf(c.right), n);
-  const prompt = c.isIntro ? 'Where does this one belong? Pick the one you liked more.' : 'Which did you like more?';
+  const rL = (c.isIntro && c.newBook === c.left) ? null : ratingForMasterIndex(L, L.master.indexOf(c.left));
+  const rR = (c.isIntro && c.newBook === c.right) ? null : ratingForMasterIndex(L, L.master.indexOf(c.right));
+  const prompt = c.isIntro ? 'Where does it belong? Pick the one you liked more.' : 'Which did you like more?';
   const introNote = (c.isIntro && c.rounds)
-    ? `Calibrating your new title — comparison ${Math.min(c.rounds, c.rounds - (c.roundsLeft || c.rounds) + 1)} of ${c.rounds}.`
+    ? `Placing it in the ${tierLabel(c.newBook && c.newBook.tier)} tier — comparison ${Math.min(c.rounds, c.rounds - (c.roundsLeft || c.rounds) + 1)} of ${c.rounds}.`
     : (c.isIntro ? 'Placing your new title.' : 'Skipping returns one to the pile, untouched.');
   return `
   <div class="fade">
@@ -1189,7 +1225,7 @@ function topTenBar(L) {
   if (!n) return '';
   const cards = L.master.slice(0, 10).map((b, i) => {
     const initials = (b.title || '?').trim().slice(0, 2).toUpperCase();
-    const rating = ratingForIndex(i, n);
+    const rating = ratingForMasterIndex(L, i);
     return `<div class="tt-card" title="${esc(b.title)}">
       <div class="tt-cover">
         <div class="tt-img" data-ttcover="${b.id}"><span class="tt-ini">${esc(initials)}</span></div>
@@ -1232,7 +1268,7 @@ function sentimentScreen(item) {
       <p class="author clamp1" style="text-align:center;">${esc(item.subtitle || '')}</p>
     </div>
     <div class="sentiment-btns">${btns}</div>
-    <p class="note">Your pick sets its starting tier — then Elo matchups place it exactly. No score is shown until it’s ranked.</p>
+    <p class="note">Your pick sets its tier (5 Stars 9–10 · Liked 6–9 · OK 3–6 · Disliked 1–3). It only compares against others in that tier. No score until it’s ranked.</p>
     <button data-act="skip" class="btn btn-ghost" style="margin-top:12px;">Skip for now</button>
   </div>`;
 }
@@ -1274,7 +1310,7 @@ function leaderboardScreen() {
     return true;
   };
   const matches = L.master
-    .map((b, i) => ({ b, i, rating: ratingForIndex(i, n) }))
+    .map((b, i) => ({ b, i, rating: ratingForMasterIndex(L, i) }))
     .filter(x =>
       (L.filterGenre === 'all' || (x.b.genres || []).includes(L.filterGenre)) &&
       (L.filterAuthor === 'all' || x.b.author === L.filterAuthor) &&
@@ -1354,7 +1390,7 @@ function libraryScreen() {
                              : 'Saving is unavailable in this preview — run the file in your browser to keep progress.';
   const cat = state.category;
   const size = ranked + pile;
-  const gems = L.master.reduce((c, it, i) => c + (isHiddenGem(cat, it, ratingForIndex(i, ranked)) ? 1 : 0), 0);
+  const gems = L.master.reduce((c, it, i) => c + (isHiddenGem(cat, it, ratingForMasterIndex(L, i)) ? 1 : 0), 0);
   const dr = densestRange(L);
   const summary = dr
     ? `Your scores cluster densest in the <b>${dr.lo}–${dr.hi}</b> band — ${dr.count} ${dr.count === 1 ? 'title' : 'titles'} sit there.`
@@ -1890,7 +1926,6 @@ const SAMPLE_TV = ['Breaking Bad', 'The Wire', 'Succession', 'The Bear', 'Severa
   'Game of Thrones', 'True Detective', 'Chernobyl', 'The Last of Us', 'Arcane'].join('\n');
 
 /* ---------------------------- boot -------------------------------- */
-// Kill any stale service worker / caches from an earlier version so this build always wins.
 try {
   if (typeof navigator !== 'undefined' && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
     navigator.serviceWorker.getRegistrations().then(function (rs) { rs.forEach(function (r) { r.unregister(); }); }).catch(function () {});
