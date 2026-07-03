@@ -414,8 +414,8 @@ function ratingForIndex(index, n) {
  * band — so a 5-star is always >= a Liked, which is always >= an OK...
  * ------------------------------------------------------------------ */
 const TIER_ORDER = { loved: 0, liked: 1, ok: 2, disliked: 3 };
-const TIER_BANDS = { loved: [9, 10], liked: [6, 8.9], ok: [3, 5.9], disliked: [1, 2.9] };
-function ratingToTier(r) { return r >= 9 ? 'loved' : r >= 6 ? 'liked' : r >= 3 ? 'ok' : 'disliked'; }
+const TIER_BANDS = { loved: [9, 10], liked: [5.5, 8.9], ok: [3, 5.4], disliked: [1, 2.9] };
+function ratingToTier(r) { return r >= 9 ? 'loved' : r >= 5.5 ? 'liked' : r >= 3 ? 'ok' : 'disliked'; }
 function tierBandRating(tier, rankInTier, size) {
   const band = TIER_BANDS[tier] || TIER_BANDS.ok; const lo = band[0], hi = band[1];
   if (size <= 1) return Math.round(((lo + hi) / 2) * 10) / 10;
@@ -440,6 +440,31 @@ function tierStart(master, tier) { // first index of this tier's segment (or whe
 }
 function tierOthers(L, item) { return L.master.filter(x => x !== item && x.tier === item.tier); }
 function tierLabel(tier) { return ({ loved: '5-star', liked: 'Liked', ok: 'OK', disliked: 'Disliked' })[tier] || 'right'; }
+const TIER_KEYS = ['loved', 'liked', 'ok', 'disliked'];
+// Nearest boundary opponent: bottom item of the closest non-empty higher tier ('up'),
+// or top item of the closest non-empty lower tier ('down'). Enables soft band edges.
+function nearestBoundaryItem(L, item, dir) {
+  const ord = TIER_ORDER[item.tier] ?? 2;
+  if (dir === 'up') {
+    for (let o = ord - 1; o >= 0; o--) { const g = L.master.filter(x => x !== item && x.tier === TIER_KEYS[o]); if (g.length) return g[g.length - 1]; }
+  } else {
+    for (let o = ord + 1; o <= 3; o++) { const g = L.master.filter(x => x !== item && x.tier === TIER_KEYS[o]); if (g.length) return g[0]; }
+  }
+  return null;
+}
+// Same-tier opponents PLUS one boundary item from each adjacent band, in master order.
+function extendedOthers(L, item, hiEdgeId, loEdgeId) {
+  return L.master
+    .filter(x => x !== item && (x.tier === item.tier || x.id === hiEdgeId || x.id === loEdgeId))
+    .sort((a, b) => L.master.indexOf(a) - L.master.indexOf(b));
+}
+// After calibration, if the title ended up above the higher edge (or below the lower edge),
+// it crossed the boundary — adopt the neighbor tier's band. Otherwise it stays put.
+function finalizeCrossing(L, item, hiEdgeId, loEdgeId) {
+  const idx = L.master.indexOf(item);
+  if (hiEdgeId) { const hb = L.master.find(x => x.id === hiEdgeId); if (hb && idx < L.master.indexOf(hb)) { item.tier = hb.tier; return; } }
+  if (loEdgeId) { const lt = L.master.find(x => x.id === loEdgeId); if (lt && idx > L.master.indexOf(lt)) { item.tier = lt.tier; return; } }
+}
 // Assign tiers to any legacy ranked items (by their old percentile) and keep master grouped by tier.
 function ensureTiers(L) {
   const n = L.master.length;
@@ -476,17 +501,20 @@ function moveItemAdjacent(master, item, opponent, above) {
   master.splice(above ? oi : oi + 1, 0, item);
   item.moves = (item.moves || 0) + 1;
 }
-// Binary-search opponent selection within the item's OWN tier. lo/hi index the
-// same-tier opponent list (stable order). Win narrows to higher, loss to lower —
-// and it never crosses a tier boundary, so tiers stay strictly ordered.
-function nextCalibration(L, item, lo, hi, roundsLeft, rounds) {
-  const others = tierOthers(L, item);
-  if (lo > hi || others.length === 0 || roundsLeft <= 0) { L.current = null; generateMatchup(L); return; }
+// Binary-search opponent selection within the item's tier, PLUS one boundary item from
+// each adjacent band. Win narrows to higher, loss to lower; if it passes a boundary item
+// it slips into that neighbor tier (see finalizeCrossing).
+function nextCalibration(L, item, lo, hi, roundsLeft, rounds, hiEdgeId, loEdgeId) {
+  const others = extendedOthers(L, item, hiEdgeId, loEdgeId);
+  if (lo > hi || others.length === 0 || roundsLeft <= 0) {
+    finalizeCrossing(L, item, hiEdgeId, loEdgeId);
+    L.current = null; generateMatchup(L); return;
+  }
   if (lo < 0) lo = 0; if (hi > others.length - 1) hi = others.length - 1;
   const mid = Math.floor((lo + hi) / 2);
   const opp = others[mid];
   L.current = { phase: 'match', isIntro: true, newBook: item, oppId: opp.id, lo, hi, rounds, roundsLeft,
-    left: item, right: opp }; // the title being ranked always sits on the left
+    hiEdgeId, loEdgeId, left: item, right: opp }; // the title being ranked always sits on the left
 }
 
 /* ----------------------------- CSV (books) ------------------------ */
@@ -834,13 +862,16 @@ function rateSentiment(key) {
   const item = c.item;
   item.tier = (SENTIMENT_LEVELS.find(x => x.key === key) ? key : 'ok');
   const insertAt = tierStart(L.master, item.tier);
-  const sameTier = L.master.filter(x => x.tier === item.tier).length;
   L.master.splice(insertAt, 0, item);       // drop in at the top of its tier
-  if (sameTier === 0) {                      // first of its tier — no matchup needed
+  const hiEdge = nearestBoundaryItem(L, item, 'up');   // bottom of the nearest higher band
+  const loEdge = nearestBoundaryItem(L, item, 'down');  // top of the nearest lower band
+  const hiEdgeId = hiEdge ? hiEdge.id : null, loEdgeId = loEdge ? loEdge.id : null;
+  const count = extendedOthers(L, item, hiEdgeId, loEdgeId).length;
+  if (count === 0) {                         // truly nothing to compare against — just seat it
     L.current = null; generateMatchup(L);
-  } else {                                    // order it within the tier via bracketed comparisons
+  } else {                                    // order within its tier, with soft band edges
     const rounds = Math.max(1, state.calibrations | 0);
-    nextCalibration(L, item, 0, sameTier - 1, rounds, rounds);
+    nextCalibration(L, item, 0, count - 1, rounds, rounds, hiEdgeId, loEdgeId);
   }
   scheduleUndo();
   render();
@@ -862,7 +893,7 @@ function choose(side) {
     let lo = c.lo || 0, hi = c.hi || 0;
     if (itemWon) { hi = mid - 1; moveItemAdjacent(L.master, item, opp, true); }   // ranks ABOVE -> only higher next
     else { lo = mid + 1; moveItemAdjacent(L.master, item, opp, false); }          // ranks BELOW -> only lower next
-    nextCalibration(L, item, lo, hi, (c.roundsLeft || 1) - 1, c.rounds);
+    nextCalibration(L, item, lo, hi, (c.roundsLeft || 1) - 1, c.rounds, c.hiEdgeId, c.loEdgeId);
     scheduleUndo(); render(); return;
   }
 
@@ -936,7 +967,8 @@ function snapshotLib(L) {
     } else {
       current = { phase: 'match', left: ref(c.left), right: ref(c.right),
         newBook: c.newBook ? ref(c.newBook) : null, isIntro: !!c.isIntro,
-        oppId: c.oppId, lo: c.lo, hi: c.hi, rounds: c.rounds, roundsLeft: c.roundsLeft };
+        oppId: c.oppId, lo: c.lo, hi: c.hi, rounds: c.rounds, roundsLeft: c.roundsLeft,
+        hiEdgeId: c.hiEdgeId, loEdgeId: c.loEdgeId };
     }
   }
   return { unranked, master, totalMatchups: L.totalMatchups, current,
@@ -1268,7 +1300,7 @@ function sentimentScreen(item) {
       <p class="author clamp1" style="text-align:center;">${esc(item.subtitle || '')}</p>
     </div>
     <div class="sentiment-btns">${btns}</div>
-    <p class="note">Your pick sets its tier (5 Stars 9–10 · Liked 6–9 · OK 3–6 · Disliked 1–3). It only compares against others in that tier. No score until it’s ranked.</p>
+    <p class="note">Your pick sets its tier (5 Stars 9–10 · Liked 5.5–9 · OK 3–5.5 · Disliked 1–3). It only compares against others in that tier. No score until it’s ranked.</p>
     <button data-act="skip" class="btn btn-ghost" style="margin-top:12px;">Skip for now</button>
   </div>`;
 }
