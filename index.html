@@ -777,6 +777,20 @@ function resetAll() {
   clearUndo();
   render();
 }
+// Clear scores/order/history for the current section but KEEP every title (all move back to the pile).
+function resetRankings() {
+  if (typeof confirm === 'function' && !confirm('Reset your ' + CATS[state.category].plural + ' rankings but keep all the titles? They’ll go back to the pile to re-rank.')) return;
+  const L = cur();
+  const items = [...L.master, ...L.unranked];
+  if (L.current && L.current.phase === 'sentiment' && L.current.item) items.push(L.current.item);
+  for (const it of items) { it.elo = undefined; it.matches = 0; it.moves = 0; }
+  L.master = []; L.unranked = items; L.totalMatchups = 0; L.current = null;
+  L.filterGenre = 'all'; L.filterAuthor = 'all'; L.search = ''; L.segments = []; L.segOpen = false;
+  state.tab = 'rank'; state.addOpen = false;
+  clearUndo();
+  generateMatchup(L);
+  render();
+}
 
 /* ============================ undo ================================ *
  * Snapshot the whole section before a vote; a 4-second banner offers
@@ -1204,9 +1218,10 @@ function libraryScreen() {
     ${state.addOpen ? addItemForm() : `<button data-act="add-open" class="btn btn-ghost" style="margin-top:16px;">Add a ${esc(meta.noun)}</button>`}
     <p class="sub-h">Unranked pile</p>
     ${list}
-    <button data-act="reset" class="btn btn-danger" style="margin-top:24px;">Reset ${esc(meta.plural)}</button>
+    <button data-act="reset-rankings" class="btn btn-ghost" style="margin-top:24px;">Reset rankings (keep my ${esc(meta.plural)})</button>
+    <button data-act="reset" class="btn btn-danger" style="margin-top:10px;">Reset ${esc(meta.plural)} (remove all titles)</button>
     <button data-act="reset-all" class="btn btn-danger" style="margin-top:10px;">Reset all sections (Books, Movies &amp; TV)</button>
-    <p class="note">${saveNote} Section reset clears only ${esc(meta.plural)}; “Reset all” wipes every section.</p>
+    <p class="note">${saveNote} “Reset rankings” keeps your titles and just clears the scores; the red buttons delete titles.</p>
   </div>`;
 }
 
@@ -1335,9 +1350,14 @@ function genreTokens(list) {
   (list || []).forEach(g => String(g).toLowerCase().split(/[^a-z0-9]+/).forEach(w => { if (w.length > 2) t.add(w); }));
   return t;
 }
+function normTitle(t) {
+  return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\b(the|a|an)\b/g, ' ').replace(/\s+/g, ' ').trim();
+}
 function buildRecommendations(cat, L) {
-  const have = new Set([...L.master, ...L.unranked].map(x => (x.title || '').trim().toLowerCase()));
-  const catalog = (REC_CATALOG[cat] || []).filter(e => !have.has(e.title.toLowerCase()));
+  // Never recommend anything already in the section (ranked, in the pile, or mid-rating).
+  const have = new Set([...L.master, ...L.unranked].map(x => normTitle(x.title)));
+  if (L.current && L.current.item) have.add(normTitle(L.current.item.title));
+  const catalog = (REC_CATALOG[cat] || []).filter(e => !have.has(normTitle(e.title)));
   if (!catalog.length) return [];
   if (!L.master.length) return shuffle(catalog).slice(0, 12); // empty section -> classics
 
@@ -1605,6 +1625,7 @@ function wireAll() {
   document.querySelectorAll('[data-sent]').forEach(b => b.onclick = () => rateSentiment(b.getAttribute('data-sent')));
   document.querySelectorAll('[data-act="skip"]').forEach(b => b.onclick = skip);
   document.querySelectorAll('[data-act="reset"]').forEach(b => b.onclick = resetCurrent);
+  document.querySelectorAll('[data-act="reset-rankings"]').forEach(b => b.onclick = resetRankings);
   document.querySelectorAll('[data-act="reset-all"]').forEach(b => b.onclick = resetAll);
   document.querySelectorAll('[data-filter]').forEach(s => s.onchange = () => { const L = cur(); if (s.getAttribute('data-filter') === 'genre') L.filterGenre = s.value; else L.filterAuthor = s.value; render(); });
   document.querySelectorAll('[data-act="clearfilter"]').forEach(b => b.onclick = () => { const L = cur(); L.filterGenre = 'all'; L.filterAuthor = 'all'; L.search = ''; L.segments = []; L.segOpen = false; render(); });
